@@ -97,12 +97,12 @@ sudo ldapadd -Q -Y EXTERNAL -H ldapi:/// -f refint2.ldif
 Connect to the LDAP server using, e.g., ApacheDirectoryStudio. Under `dc=ldap,dc=mongodb,dc=local` create the following entries:
 
 * add `organizationalUnit`: `ou=people`
- * add `inetOrgPerson`: `uid=ronan`
- * add `inetOrgPerson`: `uid=jim`
+  * add `inetOrgPerson`: `uid=ronan`
+  * add `inetOrgPerson`: `uid=jim`
 * add `organizationalUnit`: `ou=groups`
- * manually add the following groups or use the scripts below
- * add `groupOfNames`: `cn=admins` (add `uid=ronan` as a member)
- * add `groupOfNames`: `cn=biusers` (add `uid=jim` as a member)
+  * manually add the following groups or use the scripts below
+  * add `groupOfNames`: `cn=admins` (add `uid=ronan` as a member)
+  * add `groupOfNames`: `cn=biusers` (add `uid=jim` as a member)
 
 ```
 cat <<EOF > add-admins.ldif
@@ -135,8 +135,8 @@ ldapadd -x -D cn=admin,dc=ldap,dc=mongodb,dc=local -W -f add-biusers.ldif
 ### Set LDAP passwords
 
 ```
-ldappasswd -H ldap:/// -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=ronan,ou=people,dc=ldap,dc=mongodb,dc=local"
-ldappasswd -H ldap:/// -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=jim,ou=people,dc=ldap,dc=mongodb,dc=local"
+ldappasswd -H ldap://ldap.mongodb.local:389 -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=ronan,ou=people,dc=ldap,dc=mongodb,dc=local"
+ldappasswd -H ldap://ldap.mongodb.local:389 -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=jim,ou=people,dc=ldap,dc=mongodb,dc=local"
 ```
 
 (We'll assume passwords are set to the same value as the username below)
@@ -144,8 +144,8 @@ ldappasswd -H ldap:/// -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=j
 ### Test membership
 
 ```
-ldapsearch -x -LLL -H ldap:/// -b uid=ronan,ou=people,dc=ldap,dc=mongodb,dc=local dn memberof
-ldapsearch -x -LLL -H ldap:/// -b uid=jim,ou=people,dc=ldap,dc=mongodb,dc=local dn memberof
+ldapsearch -x -LLL -H ldap://ldap.mongodb.local:389 -b uid=ronan,ou=people,dc=ldap,dc=mongodb,dc=local dn memberof
+ldapsearch -x -LLL -H ldap://ldap.mongodb.local:389 -b uid=jim,ou=people,dc=ldap,dc=mongodb,dc=local dn memberof
 ```
 
 Based on the `member` field in the `admins` group above, the first command should return a `memberOf` attribute:
@@ -210,7 +210,7 @@ setParameter:
 EOF
 ```
 
-### Test using `mongodldap`
+### Test using `mongoldap`
 
 ```
 mongoldap --config mongod.cfg --user ronan
@@ -277,6 +277,159 @@ The `db.auth()` command in both cases should succeed (returning `1`). Only the f
 	}
 }
 ```
+
+## TLS
+
+### Install GNU TLS binaries & SSL Cert packages
+
+```
+sudo apt install gnutls-bin ssl-cert
+```
+
+### Generate CA & self-signed Certificate for LDAPS server
+
+We're going to use our own CA and self-signed certs for this demo...
+
+#### Create Certificate Authority
+
+Note: Replace `cn` with a suitable name if required:
+
+```
+sudo sh -c "certtool --generate-privkey > /etc/ssl/private/cakey.pem"
+
+sudo sh -c "cat <<EOF > /etc/ssl/ca.info"
+cn = MongoDB
+ca
+cert_signing_key
+EOF
+
+sudo certtool --generate-self-signed --load-privkey /etc/ssl/private/cakey.pem --template /etc/ssl/ca.info --outfile /etc/ssl/certs/cacert.pem
+```
+
+#### Create certificate
+
+**IMPORTANT**: Replace `cn` value with the FQDN for the LDAP server, especially if you want to connect from e.g. Atlas where you may have less control over DNS settings!
+
+(You many also want to update the `organization` field too).
+
+```
+sudo certtool --generate-privkey --bits 1024 --outfile /etc/ssl/private/mongodb_slapd_key.pem
+
+# MUST use public hostname of LDAP server for cn!!
+sudo sh -c "cat <<EOF > /etc/ssl/mongodb.info"
+organization = MongoDB
+cn = ec2-ww-xx-yy-zz.abc.compute.amazonaws.com
+tls_www_server
+encryption_key
+signing_key
+expiration_days = 3650
+EOF
+
+sudo certtool --generate-certificate --load-privkey /etc/ssl/private/mongodb_slapd_key.pem --load-ca-certificate /etc/ssl/certs/cacert.pem --load-ca-privkey /etc/ssl/private/cakey.pem --template /etc/ssl/mongodb.info --outfile /etc/ssl/certs/mongodb_slapd_cert.pem
+```
+
+#### Update file ownership, permissions & group membership
+
+```
+sudo chgrp openldap /etc/ssl/private/mongodb_slapd_key.pem
+sudo chmod 0640 /etc/ssl/private/mongodb_slapd_key.pem
+sudo gpasswd -a openldap ssl-cert
+```
+
+### Update LDAP Config
+
+```
+cat <<EOF > certinfo.ldif
+dn: cn=config
+add: olcTLSCACertificateFile
+olcTLSCACertificateFile: /etc/ssl/certs/cacert.pem
+-
+add: olcTLSCertificateFile
+olcTLSCertificateFile: /etc/ssl/certs/mongodb_slapd_cert.pem
+-
+add: olcTLSCertificateKeyFile
+olcTLSCertificateKeyFile: /etc/ssl/private/mongodb_slapd_key.pem
+EOF
+
+sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f certinfo.ldif
+```
+
+### Add 'ldaps' as a valid endpoint
+
+`SLAPD_SERVICES` string in the `slapd` config file needs to include `ldaps:///`, e.g.
+
+```
+sudo vi /etc/default/slapd
+```
+
+Then replace this line:
+
+```
+SLAPD_SERVICES="ldap:/// ldapi:///"
+```
+
+with this line:
+
+```
+SLAPD_SERVICES="ldap:/// ldaps:/// ldapi:///"
+```
+
+### Restart Service
+
+```
+sudo systemctl restart slapd.service
+```
+
+### Validate
+
+```
+openssl s_client -connect ldap.mongodb.local:636 -showcerts -state -CAfile /etc/ssl/certs/mongodb_slapd_cert.pem
+```
+
+```
+ldapsearch -H ldaps://ldap.mongodb.local:636 -x -b "dc=ldap,dc=mongodb,dc=local" -LLL
+```
+
+Note: You may need to add this to your `.ldaprc` file for the TLS handshake to work . (I need to do this on my Mac for example. If anyone knows why exactly I'd be very interested to hear!)
+
+```
+cat <<EOF > ~/.ldaprc
+TLS_CACERT      /etc/ssl/certs/mongodb_slapd_cert.pem
+EOF
+```
+
+## MongoDB Atlas
+
+**Work In Progress**
+
+
+Add `0.0.0.0/0` to the firewall rules on the LDAP server to allow MongoDB Atlas (and the MongoDB clusters) to connect.
+
+### Enable LDAP Authentication & Authorization in Atlas
+
+Navigate to the relevant MongoDB Atlas Project, then select the `Security` tab, followed by the `Enterprise Security` tab.
+
+Enable the `LDAP Authentication` and `LDAP Authorization` options via the rocker.
+
+Fill out the following entries (based on the configuration we created above):
+
+**Configure Your LDAP Server**
+
+`Server Hostname`: _FQDN of remote LDAPS server_
+
+`Server Port`: `636`
+
+`Bind Username`: `cn=admin,dc=ldap,dc=mongodb,dc=local`
+
+`Bind Password`: _Bind Username's password_
+
+`User To DN Mapping`: `[{ match : "(.+)", ldapQuery: "dc=ldap,dc=mongodb,dc=local??sub?(uid={0})" }]`
+
+`CA Root Certificate`: _Contents of the CA file, e.g. `/etc/ssl/certs/cacert.pem`_
+
+**Configure LDAP Authorization**
+
+`Query Template`: `{USER}?memberOf?base`
 
 ## Acknowledgements
 
