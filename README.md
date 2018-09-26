@@ -22,6 +22,7 @@ vagrant ssh
 ## Install & Configure LDAP
 
 ### Update apt & install LDAP utils
+
 ```
 sudo apt-get update
 sudo apt install slapd ldap-utils ldapscripts
@@ -44,6 +45,11 @@ sudo dpkg-reconfigure slapd
 * Move old database? `yes`
 
 ### Install memberof overlay
+
+This provides the reverse lookup capabilities such that for a `member` listed in a group, when you query the `memberOf` attribute on that member's DN you get the DN of the group back - exactly what we need to map users to roles in MongoDB!
+
+Note: Other LDAP servers, as as Microsoft's ActiveDirectory, implement this functionaity natively.
+
 ```
 cat <<EOF > memberof_load_configure.ldif
 dn: cn=module{1},cn=config
@@ -297,7 +303,7 @@ Note: Replace `cn` with a suitable name if required:
 ```
 sudo sh -c "certtool --generate-privkey > /etc/ssl/private/cakey.pem"
 
-sudo sh -c "cat <<EOF > /etc/ssl/ca.info"
+sudo sh -c "cat > /etc/ssl/ca.info" <<EOF
 cn = MongoDB
 ca
 cert_signing_key
@@ -316,7 +322,7 @@ sudo certtool --generate-self-signed --load-privkey /etc/ssl/private/cakey.pem -
 sudo certtool --generate-privkey --bits 1024 --outfile /etc/ssl/private/mongodb_slapd_key.pem
 
 # MUST use public hostname of LDAP server for cn!!
-sudo sh -c "cat <<EOF > /etc/ssl/mongodb.info"
+sudo sh -c "cat > /etc/ssl/mongodb.info" <<EOF
 organization = MongoDB
 cn = ec2-ww-xx-yy-zz.abc.compute.amazonaws.com
 tls_www_server
@@ -430,6 +436,24 @@ Fill out the following entries (based on the configuration we created above):
 
 `Query Template`: `{USER}?memberOf?base`
 
-## Acknowledgements
+## Acknowledgements & References
 
-Based on: [https://technicalnotes.wordpress.com/2014/04/19/openldap-setup-with-memberof-overlay/]() (with some minor changes, e.g. changing `HDB` to `MDB` for the `olcDatabase`)
+### MongoDB Documentation References
+
+* [LDAP Proxy Authentication](https://docs.mongodb.com/manual/core/security-ldap/)
+* [LDAP Authorization](https://docs.mongodb.com/manual/core/security-ldap-external/)
+* [Configuration File Options for LDAP](https://docs.mongodb.com/manual/reference/configuration-options/#security-ldap-options)
+* [mongoldap](https://docs.mongodb.com/manual/reference/program/mongoldap/)
+
+### MongoDB Atlas Documentation References
+
+* [Set up User Authentication and Authorization with LDAP](https://docs.atlas.mongodb.com/security-ldaps/)
+
+### MongoDB Blog posts
+
+* [How to Configure LDAP Authentication for MongoDB](https://www.mongodb.com/blog/post/how-to-configure-LDAP-authentication-for-mongodb)
+
+### External Guides
+
+* [OpenLDAP setup](https://technicalnotes.wordpress.com/2014/04/19/openldap-setup-with-memberof-overlay/) (with some minor changes, e.g. changing `HDB` to `MDB` for the `olcDatabase`)
+* [TLS setup](https://help.ubuntu.com/lts/serverguide/openldap-server.html) (see the 'TLS' section)
