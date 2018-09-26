@@ -231,7 +231,7 @@ The second command returns the following role:
 * cn=biusers,ou=groups,dc=ldap,dc=mongodb,dc=local
 ```
 
-### Start MongoDB & Conenct
+### Start MongoDB & Connect
 
 ```
 mongod -f mongod.conf
@@ -260,7 +260,7 @@ db.auth({mechanism: "PLAIN", user: "jim", pwd:"jim"})
 db.runCommand({connectionStatus:1})
 ```
 
-(replace passwords, 'pwd' fields, with the ones you defined earlier)
+(replace passwords, `pwd` fields, with the ones you defined earlier)
 
 The `db.auth()` command in both cases should succeed (returning `1`). Only the first `connectionStatus` will contain the `root@admin` role:
 
@@ -398,10 +398,9 @@ TLS_CACERT      /etc/ssl/certs/mongodb_slapd_cert.pem
 EOF
 ```
 
-## MongoDB Atlas
+## MongoDB Atlas
 
 **Work In Progress**
-
 
 Add `0.0.0.0/0` to the firewall rules on the LDAP server to allow MongoDB Atlas (and the MongoDB clusters) to connect.
 
