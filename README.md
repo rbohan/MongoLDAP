@@ -100,7 +100,7 @@ sudo ldapadd -Q -Y EXTERNAL -H ldapi:/// -f refint2.ldif
 
 ### Create users & groups
 
-Connect to the LDAP server using, e.g., ApacheDirectoryStudio. Under `dc=ldap,dc=mongodb,dc=local` create the following entries:
+Connect to the LDAP server using, e.g., [ApacheDirectoryStudio](https://directory.apache.org/studio/). Under `dc=ldap,dc=mongodb,dc=local` create the following entries:
 
 * add `organizationalUnit`: `ou=people`
   * add `inetOrgPerson`: `uid=ronan`
