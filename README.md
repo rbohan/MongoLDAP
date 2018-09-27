@@ -206,7 +206,7 @@ security:
          '[
             {
                match : "(.+)",
-               ldapQuery: "dc=ldap,dc=mongodb,dc=local??sub?uid={0}"
+               ldapQuery: "dc=ldap,dc=mongodb,dc=local??sub?(uid={0})"
             }
          ]'
       authz:
@@ -312,7 +312,7 @@ EOF
 sudo certtool --generate-self-signed --load-privkey /etc/ssl/private/cakey.pem --template /etc/ssl/ca.info --outfile /etc/ssl/certs/cacert.pem
 ```
 
-#### Create certificate
+#### Create Server Certificate
 
 **IMPORTANT**: Replace `cn` value with the FQDN for the LDAP server, especially if you want to connect from e.g. Atlas where you may have less control over DNS settings!
 
@@ -332,6 +332,12 @@ expiration_days = 3650
 EOF
 
 sudo certtool --generate-certificate --load-privkey /etc/ssl/private/mongodb_slapd_key.pem --load-ca-certificate /etc/ssl/certs/cacert.pem --load-ca-privkey /etc/ssl/private/cakey.pem --template /etc/ssl/mongodb.info --outfile /etc/ssl/certs/mongodb_slapd_cert.pem
+```
+
+Note: You may also need to update the `hostname` of the server to match the external hostname (matching the `cn` above):
+
+```
+sudo hostnamectl set-hostname ec2-ww-xx-yy-zz.abc.compute.amazonaws.com
 ```
 
 #### Update file ownership, permissions & group membership
@@ -358,6 +364,24 @@ olcTLSCertificateKeyFile: /etc/ssl/private/mongodb_slapd_key.pem
 EOF
 
 sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f certinfo.ldif
+```
+
+
+Aside:
+
+If you need to update the certs at a later time, replace the contents as follows (adding the `changetype` field and changing all the `add` fields to `replace`):
+
+```
+dn: cn=config
+changetype: modify
+replace: olcTLSCACertificateFile
+olcTLSCACertificateFile: /etc/ssl/certs/cacert.pem
+-
+replace: olcTLSCertificateFile
+olcTLSCertificateFile: /etc/ssl/certs/mongodb_slapd_cert.pem
+-
+replace: olcTLSCertificateKeyFile
+olcTLSCertificateKeyFile: /etc/ssl/private/mongodb_slapd_key.pem
 ```
 
 ### Add 'ldaps' as a valid endpoint
