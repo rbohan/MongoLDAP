@@ -10,7 +10,12 @@ This guide shows you how to install and configure OpenLDAP on Ubuntu 18.04 in or
 vagrant init ubuntu/bionic64
 ```
 
-Edit Vagrant file to expose port 389 as, e.g., 3389 or bridge network (we'll assume a bridged network accessible via `ldap.mongodb.local` - edit `/etc/hosts` to set this up if required)
+Edit Vagrant file to expose port 389 by:
+
+* Forwarding port 3389 on the host to 389 on the guest.
+* Creating a host-only or bridged network to allow the host communicate directly with the guest on port 389.
+
+For the purposes of this demo we'll assume a host-only network accessible via `ldap.mongodb.local` (edit `/etc/hosts` to set this up if required)
 
 ### Start VM & connect:
 
@@ -37,12 +42,33 @@ sudo dpkg-reconfigure slapd
 
 * Omit OpenLDAP server configuration? `no`
 * DNS domain name: `ldap.mongodb.local`
-* Organization name: `mongodb` (????)
+* Organization name: `mongodb`
 * Administrator password: `admin`
 * Confirm password: `admin`
 * Database backend to use: `MDB`
 * Do you want the database to be removed when slapd is purged? `no`
 * Move old database? `yes`
+
+This creates 2 DN's:
+
+```
+dn: dc=ldap,dc=mongodb,dc=local
+dn: cn=admin,dc=ldap,dc=mongodb,dc=local
+```
+
+The first is the top level `organization` entity for our base DN `ldap.mongodb.local` while the second is an `organizationalRole` & `simpleSecurityObject` entity representing the the `admin` user.
+
+This `admin` user can be used as the [`bind`](https://ldap.com/the-ldap-bind-operation/) user to update the directory if required.
+
+Note: LDAPv3 supports anonymous simple authentication so you will be able to query the directory if you connect with no authentication.
+
+Validate the configuration with the following command:
+
+```
+ldapsearch -H ldap:/// -x -b "dc=ldap,dc=mongodb,dc=local" -LLL dn
+```
+
+This command connects to the LDAP server running on localhost (`-H ldap:///`), uses simple authentication (`-x`), queries our base DN (`-b "dc=ldap,dc=mongodb,dc=local"`), outputs in LDIF format without comments or version (`-LLL`) and returns just the DN attributes (`dn`). We are using anonymous authentication because we haven't supplied a 'bind DN' (there is no `-D` option). The output should match the 2 DN's listed above.
 
 ### Install memberof overlay
 
@@ -100,15 +126,24 @@ sudo ldapadd -Q -Y EXTERNAL -H ldapi:/// -f refint2.ldif
 
 ### Create users & groups
 
-Connect to the LDAP server using, e.g., [ApacheDirectoryStudio](https://directory.apache.org/studio/). Under `dc=ldap,dc=mongodb,dc=local` create the following entries:
+Connect to the LDAP server using, e.g., [ApacheDirectoryStudio](https://directory.apache.org/studio/). Be sure to bind as the 'admin' user (`cn=admin,dc=ldap,dc=mongodb,dc=local`) using 'Simple Authentication' in order to be able to make modifications.
 
-* add `organizationalUnit`: `ou=people`
-  * add `inetOrgPerson`: `uid=ronan`
-  * add `inetOrgPerson`: `uid=jim`
-* add `organizationalUnit`: `ou=groups`
-  * manually add the following groups or use the scripts below
-  * add `groupOfNames`: `cn=admins` (add `uid=ronan` as a member)
-  * add `groupOfNames`: `cn=biusers` (add `uid=jim` as a member)
+Under `dc=ldap,dc=mongodb,dc=local` create the following entries:
+
+* `organizationalUnit` with a single RDN: `ou=people`
+* `organizationalUnit` with a single RDN: `ou=groups`
+
+Under the `ou=people` RDN create the following users:
+
+  * `inetOrgPerson` with `uid=ronan`
+  * `inetOrgPerson` with `uid=jim`
+
+In both cases you will also need to fill in the `cn` (common name) and `sn` (surname). For the purposes of this demo, set the `cn` to be the same as the `uid` and set the `sn` for both users to `mongodb`.
+
+Under the `ou=groups` RDN create the following groups (manually or via the scripts below):
+
+  * `groupOfNames`: `cn=admins` (add `uid=ronan` as a member)
+  * `groupOfNames`: `cn=biusers` (add `uid=jim` as a member)
 
 ```
 cat <<EOF > add-admins.ldif
@@ -138,7 +173,13 @@ EOF
 ldapadd -x -D cn=admin,dc=ldap,dc=mongodb,dc=local -W -f add-biusers.ldif
 ```
 
+This should result in the following setup:
+
+![Sample ldap.mongodb.local directory](ldap.mongodb.local.png)
+
 ### Set LDAP passwords
+
+Run the following commands from the host to set the password for both users:
 
 ```
 ldappasswd -H ldap://ldap.mongodb.local:389 -S -W -D "cn=admin,dc=ldap,dc=mongodb,dc=local" -x "uid=ronan,ou=people,dc=ldap,dc=mongodb,dc=local"
@@ -174,12 +215,12 @@ memberOf: cn=biusers,ou=groups,dc=ldap,dc=mongodb,dc=local
 
 Use the appropriate method (`apt-get`, `yum`, `m`, etc) to install MongoDB Enterprise Edition on your client machine.
 
-### Create mongod.conf file pointing to our new LDAP server
+### Create mongod.cfg file pointing to our new LDAP server
 
-Create the following mongod.conf file on your client machine:
+Create the following mongod.cfg file on your host machine:
 
 ```
-cat <<EOF > mongod.conf
+cat <<EOF > mongod.cfg
 storage:
   dbPath: /data/
 
@@ -216,7 +257,21 @@ setParameter:
 EOF
 ```
 
+This defines a fairly standard confuration but with LDAP enabled. Focusing on the `security` section:
+
+* We are not enabling authorization at this point (can be enabled later if required).
+* We have disabled transport encryption meaning that all network communication occurs in plaintext (for production scenarios you would remove the `transportSecurity: none` setting, which would enable transport security).
+* We have specified the FQDN of our LDAP server (including port).
+* We are binding with the `admin` user.
+* We have specified a single `userToDNMapping` rule which takes any input and converts it into a sub-tree LDAP query, looking for users with that string as their `uid`.
+* We've specified a base LDAP query as the authorization template, taking the DN we matched via the `userToDNMapping` query and retrieving the `memberOf` attribute.
+* We are using the `PLAIN` authentication mechanism, which is how we tell the system we're using an LDAP server for authentication purposes.
+
 ### Test using `mongoldap`
+
+`mongoldap` is a command line tool supplied with MongoDB Enterprise which can validate the mongod configuration file without requiring you to start/restart a `mongod` process.
+
+Test our configuration file using the two users we have defined. Note that we use a simple value for each user which will be mapped to a DN based on the `userToDNMapping` rules.
 
 ```
 mongoldap --config mongod.cfg --user ronan
@@ -239,12 +294,32 @@ The second command returns the following role:
 
 ### Start MongoDB & Connect
 
+Start the `mongod` process (make sure you are using the Enterprise version!):
+
 ```
-mongod -f mongod.conf
+mongod -f mongod.cfg
+```
+
+Check the log file (`/data/mongodb.log`) for a successful start. In particular look for the `initandlisten` line specifying the `options`, making sure they match the options in the configuration file. Also check for a subsequent `initandlisten` line containing the following text:
+
+```
+Server configured with LDAP Authorization. Spawned $external user cache invalidator.
+```
+
+Once the server is running you can connect via the mongo shell (we don't have authorization enabled at this point so we can just connect):
+
+```
 mongo
 ```
 
 ### Create admin & readonly roles
+
+In order to allow people defined in our LDAP server to connect to the database we have to create `roles` in the database with associated privileges. We do *not* have to create any users directly. Instead the roles defined in the database map to the groups in our LDAP server and users which are members of these groups will be granted the privileges defined by the associated MongoDB role.
+
+We will create 2 roles:
+
+1. For the `cn=admins` group, giving those users full root permission.
+2. For the `cn=biusers` group, giving those users read-only permission on a single collection (`reporting.webstats`).
 
 ```
 use admin
@@ -252,7 +327,7 @@ db.createRole({role: "cn=admins,ou=groups,dc=ldap,dc=mongodb,dc=local", privileg
 db.createRole({role: "cn=biusers,ou=groups,dc=ldap,dc=mongodb,dc=local", privileges: [{ resource: { db: "reporting", collection: "webstats" }, actions: [ "find" ] }], roles: []})
 ```
 
-Any member of the `cn=admins` group will be a MongoDB root user, while any member of the `cn=biusers` gropu will only have read access (`find`) to the `reporting.webstats` namespace.
+In this example any member of the `cn=admins` group will be a MongoDB root user, while any member of the `cn=biusers` group will only have read access (`find`) to the `reporting.webstats` namespace.
 
 ### Test new roles
 
@@ -266,7 +341,7 @@ db.auth({mechanism: "PLAIN", user: "jim", pwd:"jim"})
 db.runCommand({connectionStatus:1})
 ```
 
-(replace passwords, `pwd` fields, with the ones you defined earlier)
+(replace passwords, i.e., `pwd` fields, with the ones you defined earlier if different)
 
 The `db.auth()` command in both cases should succeed (returning `1`). Only the first `connectionStatus` will contain the `root@admin` role:
 
@@ -287,6 +362,8 @@ The `db.auth()` command in both cases should succeed (returning `1`). Only the f
 ## TLS
 
 ### Install GNU TLS binaries & SSL Cert packages
+
+Install the various packages on the guest as follows:
 
 ```
 sudo apt install gnutls-bin ssl-cert
@@ -314,7 +391,7 @@ sudo certtool --generate-self-signed --load-privkey /etc/ssl/private/cakey.pem -
 
 #### Create Server Certificate
 
-**IMPORTANT**: Replace `cn` value with the FQDN for the LDAP server, especially if you want to connect from e.g. Atlas where you may have less control over DNS settings!
+**IMPORTANT**: Replace `cn` value with the FQDN for the LDAP server, especially if you want to connect from Atlas, for example, where you may have less control over DNS settings!
 
 (You many also want to update the `organization` field too).
 
@@ -369,7 +446,7 @@ sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f certinfo.ldif
 
 Aside:
 
-If you need to update the certs at a later time, replace the contents as follows (adding the `changetype` field and changing all the `add` fields to `replace`):
+If you need to update the certs at a later time, replace the file contents as follows (adding the `changetype` field and changing all the `add` fields to `replace`) before executing the `ldapmodify` command:
 
 ```
 dn: cn=config
@@ -386,7 +463,7 @@ olcTLSCertificateKeyFile: /etc/ssl/private/mongodb_slapd_key.pem
 
 ### Add 'ldaps' as a valid endpoint
 
-`SLAPD_SERVICES` string in the `slapd` config file needs to include `ldaps:///`, e.g.
+MongoDB support LDAPS, not StartTLS over a standard LDAP connection, so the `SLAPD_SERVICES` string in the `slapd` config file needs to include `ldaps:///`, e.g.
 
 ```
 sudo vi /etc/default/slapd
@@ -412,15 +489,19 @@ sudo systemctl restart slapd.service
 
 ### Validate
 
+Check we have some basic connectivity by using an OpenSSL command line tool:
+
 ```
 openssl s_client -connect ldap.mongodb.local:636 -showcerts -state -CAfile /etc/ssl/certs/mongodb_slapd_cert.pem
 ```
+
+And now with `ldapsearch`, noting the user of the `ldaps` URI scheme and that we're connecting to port 636:
 
 ```
 ldapsearch -H ldaps://ldap.mongodb.local:636 -x -b "dc=ldap,dc=mongodb,dc=local" -LLL
 ```
 
-Note: You may need to add this to your `.ldaprc` file for the TLS handshake to work . (I need to do this on my Mac for example. If anyone knows why exactly I'd be very interested to hear!)
+Note: You may need to add this to your `.ldaprc` file for the TLS handshake to work. (I need to do this on my Mac for example. If anyone knows why exactly I'd be very interested to hear!)
 
 ```
 cat <<EOF > ~/.ldaprc
@@ -430,7 +511,7 @@ EOF
 
 ## MongoDB Atlas
 
-**Work In Progress**
+### Set up firewall rules
 
 Add `0.0.0.0/0` to the firewall rules on the LDAP server to allow MongoDB Atlas (and the MongoDB clusters) to connect.
 
@@ -450,7 +531,7 @@ Fill out the following entries (based on the configuration we created above):
 
 `Bind Username`: `cn=admin,dc=ldap,dc=mongodb,dc=local`
 
-`Bind Password`: _Bind Username's password_
+`Bind Password`: `admin` _(Bind Username's password)_
 
 `User To DN Mapping`: `[{ match : "(.+)", ldapQuery: "dc=ldap,dc=mongodb,dc=local??sub?(uid={0})" }]`
 
@@ -459,6 +540,14 @@ Fill out the following entries (based on the configuration we created above):
 **Configure LDAP Authorization**
 
 `Query Template`: `{USER}?memberOf?base`
+
+**Validate and Save**
+
+Once all the values are set click the 'Validate and Save' button at the bottom of the screen. All going well MongoDB Atlas should process the values and after a short pause (as it connects to the LDAP server) it should indicate a successful configuration change.
+
+### Create LDAP Roles in Atlas
+
+** _**work in progress**_ **
 
 ## Acknowledgements & References
 
