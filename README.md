@@ -176,7 +176,7 @@ ldapadd -x -D cn=admin,dc=ldap,dc=mongodb,dc=local -W -f add-users.ldif
 
 This should result in the following setup:
 
-![Sample ldap.mongodb.local directory](ldap.mongodb.local.png)
+![Sample LDAP directory](ldap.mongodb.local.png)
 
 ### Set LDAP passwords
 
