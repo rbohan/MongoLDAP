@@ -15,7 +15,7 @@ Edit Vagrant file to expose port 389 by:
 * Forwarding port 3389 on the host to 389 on the guest.
 * Creating a host-only or bridged network to allow the host communicate directly with the guest on port 389.
 
-For the purposes of this demo we'll assume a host-only network accessible via `ldap.mongodb.local` (edit `/etc/hosts` to set this up if required)
+For the purposes of this demo we'll assume a host-only network accessible via `ldap.mongodb.local` (edit `/etc/hosts` to set this up if required, on both the host and guest)
 
 ### Start VM & connect:
 
@@ -23,6 +23,8 @@ For the purposes of this demo we'll assume a host-only network accessible via `l
 vagrant up
 vagrant ssh
 ```
+
+_Note: Don't forget to update `/etc/hosts`!_
 
 ## Install & Configure LDAP
 
@@ -60,7 +62,7 @@ The first is the top level `organization` entity for our base DN `ldap.mongodb.l
 
 This `admin` user can be used as the [`bind`](https://ldap.com/the-ldap-bind-operation/) user to update the directory if required.
 
-Note: LDAPv3 supports anonymous simple authentication so you will be able to query the directory if you connect with no authentication.
+Note: LDAPv3 supports anonymous simple authentication so you will be able to _query_ this LDAP directory with or without a bind user (writes will require an authenticated, aka bind, user).
 
 Validate the configuration with the following command:
 
@@ -263,9 +265,9 @@ EOF
 This defines a fairly standard confuration but with LDAP enabled. Focusing on the `security` section:
 
 * We are not enabling authorization at this point (can be enabled later if required).
-* We have disabled transport encryption meaning that all network communication occurs in plaintext (for production scenarios you would remove the `transportSecurity: none` setting, which would enable transport security).
+* We have actively disabled transport encryption meaning that all network communication occurs in plaintext (the default is to use transport encryption, aka TLS). Do not use this setting for production systems!
 * We have specified the FQDN of our LDAP server (including port).
-* We are binding with the `admin` user.
+* We are binding with the `admin` user (using the full DN).
 * We have specified a single `userToDNMapping` rule which takes any input and converts it into a sub-tree LDAP query, looking for users with that string as their `uid`.
 * We've specified a base LDAP query as the authorization template, taking the DN we matched via the `userToDNMapping` query and retrieving the `memberOf` attribute.
 * We are using the `PLAIN` authentication mechanism, which is how we tell the system we're using an LDAP server for authentication purposes.
@@ -281,15 +283,16 @@ mongoldap --config mongod.cfg --user ronan
 mongoldap --config mongod.cfg --user jim
 ```
 
-Ignore any FAIL's relating to binding with a plaintext password over a non-TLS connection (setting up an LDAPS server is left as an exercise for the reader...)
+Ignore any FAIL's relating to binding with a plaintext password over a non-TLS connection (setting up an LDAPS server is covered later in this guide.)
 
-The first command returns the following role:
+The first command (for `uid=ronan`) returns the following roles:
 
 ```
 * cn=admins,ou=groups,dc=ldap,dc=mongodb,dc=local
+* cn=users,ou=groups,dc=ldap,dc=mongodb,dc=local
 ```
 
-The second command returns the following role:
+The second command (for `uid=jim`) returns the following role:
 
 ```
 * cn=users,ou=groups,dc=ldap,dc=mongodb,dc=local
@@ -322,15 +325,15 @@ In order to allow users defined in our LDAP server to connect to the database we
 We will create 2 roles:
 
 1. For the `cn=admins` group, giving those users full root permission.
-2. For the `cn=users` group, giving those users read-only permission on a single collection (`reporting.webstats`).
+2. For the `cn=users` group, giving those users read-only permissions.
 
 ```
 use admin
 db.createRole({role: "cn=admins,ou=groups,dc=ldap,dc=mongodb,dc=local", privileges:[], roles: ["root"]})
-db.createRole({role: "cn=users,ou=groups,dc=ldap,dc=mongodb,dc=local", privileges: [{ resource: { db: "reporting", collection: "webstats" }, actions: [ "find" ] }], roles: []})
+db.createRole({role: "cn=users,ou=groups,dc=ldap,dc=mongodb,dc=local", privileges: [], roles: ["readAnyDatabase"]})
 ```
 
-In this example any member of the `cn=admins` group will be a MongoDB root user, while any member of the `cn=users` group will only have read access (`find`) to the `reporting.webstats` namespace.
+In this example any member of the `cn=admins` group will be a MongoDB root user, while any member of the `cn=users` group will only be granted read access.
 
 ### Test new roles
 
@@ -346,7 +349,9 @@ db.runCommand({connectionStatus:1})
 
 (replace passwords, i.e., `pwd` fields, with the ones you defined earlier if different)
 
-The `db.auth()` command in both cases should succeed (returning `1`). Only the first `connectionStatus` will contain the `root@admin` role:
+The `db.auth()` command in both cases should succeed (returning `1`).
+
+User `ronan` is the only one that contains the `root@admin` role:
 
 ```
 {
@@ -361,6 +366,23 @@ The `db.auth()` command in both cases should succeed (returning `1`). Only the f
 	}
 }
 ```
+
+Both users should include the `readAnyDatabase@admin` role:
+
+```
+{
+	"authInfo" : {
+		...
+		"authenticatedUserRoles" : [
+			{
+				"role" : "readAnyDatabase",
+				"db" : "admin"
+			},
+		...
+	}
+}
+```
+
 
 ## TLS
 
@@ -392,18 +414,14 @@ sudo certtool --generate-self-signed --load-privkey /etc/ssl/private/cakey.pem -
 
 #### Update the Hostname (if required)
 
-The simplest way to get all of this TLS stuff to work is to make sure the hostname of the LDAP server matches the full external hostname of the server itself (the FQDN). This is particularly important with AWS instances, for example.
+We're going to assume the FQDN for the LDAP server is `ldap.mongodb.local`.
+
+If you plan to use this LDAP server with MongoDB Atlas you should update the hostname to the FQDN of the host and use that in place of `ldap.mongodb.local` in the commands below.
 
 If you need to update the hostname run a command similar to the following (substituting in the FQDN):
 
 ```
-sudo hostnamectl set-hostname ec2-ww-xx-yy-zz.abc.compute.amazonaws.com
-```
-
-After this you'll need to restart the LDAP server:
-
-```
-sudo systemctl restart slapd.service
+sudo hostnamectl set-hostname ldap.mongodb.local
 ```
 
 #### Create Server Certificate
@@ -416,7 +434,7 @@ sudo certtool --generate-privkey --bits 1024 --outfile /etc/ssl/private/mongodb_
 # MUST use public hostname of LDAP server for cn!!
 sudo sh -c "cat > /etc/ssl/mongodb.info" <<EOF
 organization = MongoDB
-cn = ec2-ww-xx-yy-zz.abc.compute.amazonaws.com
+cn = ldap.mongodb.local
 tls_www_server
 encryption_key
 signing_key
@@ -452,6 +470,11 @@ EOF
 sudo ldapmodify -Y EXTERNAL -H ldapi:/// -f certinfo.ldif
 ```
 
+If this command fails try restarting the LDAP server and retrying:
+
+```
+sudo systemctl restart slapd.service
+```
 
 *Aside*:
 
@@ -502,7 +525,7 @@ sudo systemctl restart slapd.service
 
 ### Validate
 
-Check we have some basic connectivity by using an OpenSSL command line tool from the client machine:
+Check we have some basic connectivity by using an OpenSSL command line tool:
 
 ```
 openssl s_client -connect ldap.mongodb.local:636 -showcerts -state -CAfile /etc/ssl/certs/mongodb_slapd_cert.pem
@@ -514,11 +537,11 @@ And now with `ldapsearch`, noting the user of the `ldaps` URI scheme and that we
 ldapsearch -H ldaps://ldap.mongodb.local:636 -x -b "dc=ldap,dc=mongodb,dc=local" -LLL
 ```
 
-Note: You may need to add this to your `.ldaprc` file for the TLS handshake to work. (I need to do this on my Mac for example. If anyone knows why exactly I'd be very interested to hear!)
+Note: You may need to add this to your `.ldaprc` file for the TLS handshake to work. (If anyone knows why exactly I'd be very interested to hear!)
 
 ```
 cat <<EOF > ~/.ldaprc
-TLS_CACERT      /etc/ssl/certs/mongodb_slapd_cert.pem
+TLS_REQCERT allow
 EOF
 ```
 
@@ -548,7 +571,7 @@ Fill out the following entries (based on the configuration we created above):
 
 `Bind Password`: `admin` _(Bind Username's password)_
 
-`User To DN Mapping`: `[{ match : "(.+)", ldapQuery: "dc=ldap,dc=mongodb,dc=local??sub?(uid={0})" }]`
+`User To DN Mapping`: `[{ match : "(.+)", ldapQuery: "ou=users,dc=ldap,dc=mongodb,dc=local??sub?(uid={0})" }]`
 
 `CA Root Certificate`: _Contents of the CA file, e.g. `/etc/ssl/certs/cacert.pem`_
 
