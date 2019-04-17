@@ -33,7 +33,7 @@ If using a peered VPC connection you should specify the FQDN using the internal 
 
 The 'User To DN Mapping' setting above defines a single rule which takes the username provided when the user connects to the Atlas cluster and performs a sub-tree search under the `ou=users` branch, searching for users where the `uid` attribute equals the username provided.
 
-#### Configure LDAP Authorization
+#### Configure LDAP Authorization
 
 ![Authorization details](AtlasAuthZ.png)
 
